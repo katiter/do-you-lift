@@ -1,0 +1,186 @@
+---
+title: "Do you even lift?"
+author: "Katiter"
+date: "June 10, 2015"
+output:
+  html_document: default
+  pdf_document:
+    highlight: tango
+graphics: yes
+---
+
+## Context
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. In this project, data from accelerometers on the belt, forearm, arm, and dumbbell were gathered from six participants. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har.
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl correctly and incorrectly in 5 different ways (the "classe" variable in the training set):
+
+- exactly according to the specification (Class A)
+- throwing the elbows to the front (Class B)
+- lifting the dumbbell only halfway (Class C)
+- lowering the dumbbell only halfway (Class D) 
+- throwing the hips to the front (Class E)
+
+## Objective
+The goal is to build a prediction model based on training data and use it to predict 20 different test cases. predict the manner in which the test group did the exercise. You may use any of the other variables to predict with. 
+
+```{r, echo=FALSE}
+setwd('~/Dropbox/PhD/Cour/09_practical_machine')
+knitr::opts_chunk$set(cache=FALSE)
+knitr::opts_chunk$set(warning=FALSE, tidy=TRUE)
+
+# trainUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+# testUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+# All the method tags available are located in http://topepo.github.io/caret/bytag.html
+```
+
+## Report
+Compiled using `r R.Version()$version.string`. 
+
+First we load the downloaded training data and remove the bookkeeping columns -- ones that are NA throughout or consist of summary data that are not relevant to training our prediction model. 
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(caret)
+require(dplyr)
+
+set.seed(1)
+fitbit <- read.csv('pml-training.csv', na.strings=c("NA", ''))
+testdata <- read.csv('pml-testing.csv', na.strings=c("NA", ''))
+
+#Use only a subset of half the data for faster training. Comment this out if you don't need it.
+# fitbit <- tbl_df(fitbit[sample(nrow(fitbit), round(nrow(fitbit)*0.50), replace=F),]) 
+#Get only time series data by removing the summary data, corresponding to the rows where new_window=='no'
+fitbit <- filter(fitbit, new_window=='no')
+#Remove columns with irrelevant data
+testdata_clean <- testdata[, colSums(is.na(testdata)) == 0] %>% 
+  subset(select=-c(X, user_name, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, num_window, problem_id))
+fitbit_clean <- fitbit[, colnames(testdata_clean)]
+```
+
+Let's briefly inspect the data. What are the frequencies of different categories like?
+```{r}
+table(fitbit$classe)
+```
+
+Now we prune down the data even further by removing columns with near-zero variance and highly correlated columns in order to speed up model traning.
+```{r}
+
+#Are there columns with near zero variance?
+nzv_data <- nearZeroVar(fitbit_clean, saveMetrics=TRUE)
+#Remove some columns with high correlation to speed up model creation
+correlation_cutoff <- 0.90
+highlyCorDescr <- findCorrelation(cor(fitbit_clean), cutoff = correlation_cutoff)
+removed_columns <- colnames(fitbit_clean)[highlyCorDescr]
+fitbit_clean <- fitbit_clean[,-highlyCorDescr]
+testdata_clean <- testdata_clean[,-highlyCorDescr]
+fitbit_clean$classe <- as.factor(fitbit$classe) #Add back the classe column
+```
+We removed the columns ``r removed_columns``, which have absolute correlation coefficients of over `r correlation_cutoff` (alternatively, we could have preprocessed with PCA). Note that ``r sum(nzv_data$nzv)`` columns had near-zero variance.
+
+Next, we partition data into a 60:40 training and cross-validation set.
+```{r}
+inTrain <- createDataPartition(fitbit_clean$classe, p=0.6, list=F)
+training <- fitbit_clean[inTrain,]
+testing <- fitbit_clean[-inTrain,]
+```
+
+Here we're going to use and compare the results of six models discussed in the course. We're going to preprocess with centering and rescaling for good measure, then use resampling with five folds to reduce out-of-sample errors and get the best tuning parameters.
+
+- Linear Discriminant Analysis (`lda`)
+- Support Vector Machines with Radial Basis Function Kernel (`svmRadial`)
+- k-Nearest Neighbors (`knn`)
+- CART, a tree method (`rpart`)
+- Random Forest (`rf`)
+- Stochastic Gradient Boosting (`gbm`)
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+cvCtrl <- trainControl(method = "cv", number = 5, allowParallel = TRUE, verboseIter = TRUE)
+
+doMC::registerDoMC(cores=parallel::detectCores()) #normally 4 on this machine
+
+time_lda <- system.time(model_lda <- train(classe ~ ., data=training, method="lda", trControl=cvCtrl, preProcess=c('scale','center')))
+time_svmRadial <- system.time(model_svmRadial <- train(classe ~ ., data=training, method="svmRadial", trControl=cvCtrl, preProcess=c('scale','center')))
+time_knn <- system.time(model_knn <- train(classe ~ ., data=training, method="knn", trControl=cvCtrl, preProcess=c('scale','center')))
+time_rpart <- system.time(model_rpart <- train(classe ~ ., data=training, method="rpart", trControl=cvCtrl))
+time_rf <- system.time(model_rf <- train(classe ~ ., data=training, method="rf", trControl=cvCtrl))
+time_gbm <- system.time(model_gbm <- train(classe ~ ., data=training, method="gbm", trControl=cvCtrl))
+
+```
+
+
+## Results
+We apply these constructed models to the cross-validation data set.
+```{r}
+predict_lda <- confusionMatrix(predict(model_lda, testing), testing$classe)
+predict_svmRadial <- confusionMatrix(predict(model_svmRadial, testing), testing$classe)
+predict_knn <- confusionMatrix(predict(model_knn, testing), testing$classe)
+predict_rpart <- confusionMatrix(predict(model_rpart, testing), testing$classe)
+predict_rf <- confusionMatrix(predict(model_rf, testing), testing$classe)
+predict_gbm <- confusionMatrix(predict(model_gbm, testing), testing$classe)
+doMC::registerDoMC(cores=1)
+
+```
+
+Then we assemble a table from these results summarizing the walltime and performance of each of these models. in terms of the accuracy and expected error rates (kappa):
+```{r, results='asis', echo=FALSE}
+results <- data.frame(Model=c('lda', 'svmRadial', 'knn', 'rpart', 'rf', 'gbm'),
+                        Time=c(
+                            time_lda[3],
+                            time_svmRadial[3],
+                            time_knn[3],
+                            time_rpart[3],
+                            time_rf[3],
+                            time_gbm[3]),
+                        Accuracy=c(
+                           max(head(model_lda$results)$Accuracy),
+                           max(head(model_svmRadial$results)$Accuracy),
+                           max(head(model_knn$results)$Accuracy),
+                           max(head(model_rpart$results)$Accuracy),
+                           max(head(model_rf$results)$Accuracy),
+                           max(head(model_gbm$results)$Accuracy)),
+                        Kappa=c(
+                            predict_lda$overall[1],
+                            predict_svmRadial$overall[1],
+                            predict_knn$overall[1],
+                            predict_rpart$overall[1],
+                            predict_rf$overall[1],
+                            predict_gbm$overall[1]))
+
+
+knitr::kable(results, digits=2,
+             caption='Elapsed time (seconds), fitting accuracy (percent) and the Kappa coefficient of prediction')
+```
+
+
+Evidently, random forest (using tuning parameter ``r model_rf$bestTune``) gives the most accurate predictions of these seven models, with an estimated out-of-sample error of ``r scales::percent(1-max(head(model_rf$results)$Accuracy))``. The final model was constructed with ``r model_rf$bestTune`` randomly selected predictors as the tuning parameter. However, note that it's the most expensive model to train. 
+
+The k-Nearest Neighbors is the most cost-efficient model to build and yields accuracies comparable to that of boosting, but only given sufficient training data. For smaller training sizes (half the entire set or less), stochastic gradient boosting appears to be an excellent compromise between computational efficiency and accuracy, with an estimated out-of-sample error of ``r scales::percent(1-max(head(model_gbm$results)$Accuracy))``.
+
+So which are the ten most relevant predictor variables in our final random forest model?
+```{r, echo=FALSE, fig.width=5, fig.height=2.5, fig.align='center'}
+plot(varImp(model_rf, scale = FALSE), top=10)
+```
+
+
+```{r, echo=FALSE, eval=FALSE}
+answers_rf <- predict(model_rf, testdata_clean)
+answers_gbm <- predict(model_gbm, testdata_clean)
+comparison_table <- data.frame(number=seq(1, nrow(testdata_clean)), answers_rf=answers_rf, answers_gbm=answers_gbm, correct_answers=correct_answers)
+knitr::kable(comparison_table)
+You got numbers ``which(!as.character(answers_gbm) == correct_answers)`` wrong.
+```
+
+Now let's run our prediction model on the twenty out-of-sample data set and print out the results for grading.
+```{r}
+
+answers <- predict(model_rf, testdata_clean)
+pml_write_files = function(x){
+  n = length(x)
+  dir.create('submission', showWarnings = FALSE)
+  for(i in 1:n){
+    filename = paste0("submission/problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(answers)
+```
